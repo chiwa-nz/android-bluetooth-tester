@@ -57,7 +57,6 @@ sealed class BluetoothAction {
     data class DeviceScanned(val name: String?, val mac: String?) : BluetoothAction()
     data class DeviceConnected(val device: Device) : BluetoothAction()
     data object DeviceDisconnected : BluetoothAction()
-    data object DevicesRandomised : BluetoothAction()
     data object DevicesReset : BluetoothAction()
     data class NamedOnlyToggled(val enabled: Boolean) : BluetoothAction()
 }
@@ -77,31 +76,9 @@ data class BluetoothState(
     val namedOnly: Boolean = true
 )
 
-fun generateRandomDevices(
-    count: Int = 10,
-    nameLength: Int = 10,
-    macLength: Int = 10
-) : List<Device> {
-    fun getRandomString(length: Int) : String {
-        val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
-        return (1..length).map { allowedChars.random() }.joinToString("")
-    }
-
-    fun getRandomDevice(nameLength: Int = 10, macLength: Int = 10) : Device {
-        return Device(getRandomString(nameLength), getRandomString(macLength))
-    }
-
-    val devices = mutableListOf<Device>()
-    repeat (count) { devices.add(getRandomDevice(nameLength, macLength)) }
-    return devices.toList()
-}
-
 class BluetoothReducer : Reducer<BluetoothState, BluetoothAction> {
     override fun reduce(state: BluetoothState, action: BluetoothAction): ReduceResult<BluetoothState, BluetoothAction> =
         when (action) {
-            BluetoothAction.DevicesRandomised -> {
-                state.copy(devices = generateRandomDevices()).withoutEffect()
-            }
             is BluetoothAction.BluetoothInitialised ->
                 state.copy(manager = action.manager).withoutEffect()
             is BluetoothAction.BluetoothDebugMessaged ->
@@ -500,12 +477,6 @@ fun BluetoothMain (
                     }
                 ) {
                     Text("Reset")
-                }
-                Button(
-                    modifier = Modifier.padding(start = 8.dp),
-                    onClick = { bluetoothStore.send(BluetoothAction.DevicesRandomised) }
-                ) {
-                    Text("Random Devices")
                 }
             }
             Row {

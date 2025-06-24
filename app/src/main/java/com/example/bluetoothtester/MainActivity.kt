@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -83,11 +84,11 @@ fun BasePage(
                     Text(
                         text = "Bluetooth Tester",
                         fontWeight = FontWeight.Bold,
-                        color = Color(29, 39 , 92)
+                        color = colorResource(R.color.tertiary_blue)
                     )
                 },
                 colors = TopAppBarDefaults.largeTopAppBarColors(
-                    containerColor = Color(125, 144, 255)
+                    containerColor = colorResource(R.color.primary_blue)
                 )
             )
         }
