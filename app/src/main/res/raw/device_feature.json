@@ -1,0 +1,26 @@
+{
+  "audio_source_mic": {
+    "manufacture": [],
+    "model": []
+  },
+  "dilay_start_sound": {
+    "manufacture": [],
+    "model": ["moto g05"]
+  },
+  "need_wakelock": {
+    "manufacture": [],
+    "model": ["moto g05", "moto g24", "FCG02", "M07", "SCG18"]
+  },
+  "need_sound_extension": {
+    "manufacture": [],
+    "model": ["moto g05", "moto g24", "FCG02", "M07", "SCG18"]
+  },
+  "sco_mode_off_default": {
+    "manufacture": ["samsung"],
+    "model": []
+  },
+  "shokz_ble_action_delay": {
+    "manufacture": ["samsung"],
+    "model": []
+  }
+}

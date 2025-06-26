@@ -1,0 +1,70 @@
+{
+  "services": [
+    {
+      "service_uuid": "0000ffa0-0000-1000-8000-00805f9b34fb",
+      "characteristic_uuid": [
+        "0000ffa8-0000-1000-8000-00805f9b34fb"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0"
+    },
+
+    {
+      "service_uuid": "0000FFE0-0000-1000-8000-00805F9B34FB",
+      "characteristic_uuid": [
+        "0000FFE1-0000-1000-8000-00805F9B34FB"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0"
+    },
+
+    {
+      "service_uuid": "b128cc01-e5fb-42ec-aebc-3d6673fbfb01",
+      "characteristic_uuid": [
+        "b128cc10-e5fb-42ec-aebc-3d6673fbfb01"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0"
+    },
+
+    {
+      "service_uuid": "00001ae1-0000-1000-8000-00805f9b34fb",
+      "characteristic_uuid": [
+        "00002ce1-0000-1000-8000-00805f9b34fb"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0"
+    },
+
+    {
+      "service_uuid": "b283d606-04fd-11ee-be56-0242ac120002",
+      "characteristic_uuid": [
+        "b283dc64-04fd-11ee-be56-0242ac120002"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0"
+    },
+
+    {
+      "service_uuid": "EF01CDAA-D46E-D46E-0128-1616D06ED46E",
+      "characteristic_uuid": [
+        "EF01CDAA-D46E-D46E-0128-1616D66ED46E"
+      ],
+      "button_event_code_pressed": "171",
+      "button_event_code_released": "205"
+    },
+
+
+
+
+    {
+      "service_uuid": "0000fef0-0000-1000-8000-00805f9b34fb",
+      "characteristic_uuid": [
+        "0000fef1-0000-1000-8000-00805f9b34fb"
+      ],
+      "button_event_code_pressed": "1",
+      "button_event_code_released": "0",
+      "model": "shokz"
+    }
+  ]
+}
