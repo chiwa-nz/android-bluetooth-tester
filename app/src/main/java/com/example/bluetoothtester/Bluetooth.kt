@@ -13,8 +13,19 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Context.AUDIO_SERVICE
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -34,31 +45,53 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.ContextCompat.getSystemService
 import com.toggl.komposable.architecture.ReduceResult
 import com.toggl.komposable.architecture.Reducer
 import com.toggl.komposable.extensions.withoutEffect
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
-
+import kotlin.apply
+import java.io.RandomAccessFile
+import java.nio.ByteOrder
+import java.nio.ByteBuffer
 
 const val logTag = "Bluetooth"
+val CLIENT_CHARACTERISTIC_CONFIG_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
 sealed class BluetoothAction {
     data class BluetoothInitialised(val manager: BluetoothManager? = null) : BluetoothAction()
     data class BluetoothDebugMessaged(val message: String) : BluetoothAction()
     data class ActivityCreated(val activity: Activity) : BluetoothAction()
+    data class ContextCreated(val context: Context) : BluetoothAction()
     data class DeviceScanned(val name: String?, val mac: String?) : BluetoothAction()
     data class DeviceConnected(val device: Device) : BluetoothAction()
     data object DeviceDisconnected : BluetoothAction()
     data object DevicesReset : BluetoothAction()
     data class NamedOnlyToggled(val enabled: Boolean) : BluetoothAction()
+    data class NoRealgateToggled(val enabled: Boolean) : BluetoothAction()
+    data class SoundPlayed(val name: String? = null) : BluetoothAction()
+    data class AudioManagerInitialised(val audioManager: AudioManager) : BluetoothAction()
+    data class ScopeInitialised(val coroutineScope: CoroutineScope) : BluetoothAction()
+    data object RecordingToggled : BluetoothAction()
+    data class RecordingSet(val enabled: Boolean) : BluetoothAction()
+    data class RecordingStarted(val audioRecord: AudioRecord, val recordingJob: Job) : BluetoothAction()
 }
 
 data class Device (
@@ -73,10 +106,52 @@ data class BluetoothState(
     val connectedDevice: Device? = null,
     val message: String = "",
     val activity: Activity? = null,
-    val namedOnly: Boolean = true
+    val context: Context? = null,
+    val namedOnly: Boolean = true,
+    val noRealgate: Boolean = true,
+    val isRecording: Boolean = false,
+    val audioManager: AudioManager? = null,
+    val audioRecord: AudioRecord? = null,
+    val coroutineScope: CoroutineScope? = null,
+    val recordingJob: Job? = null
 )
 
+private fun writeWavHeader(out: OutputStream, sampleRate: Int, channelConfig: Int) {
+    val channels = if (channelConfig == AudioFormat.CHANNEL_IN_MONO) 1 else 2
+    val byteRate = sampleRate * channels * 2 // 16-bit
+
+    val header = ByteArray(44)
+    ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN).apply {
+        put("RIFF".toByteArray())
+        putInt(0) // placeholder for file size
+        put("WAVE".toByteArray())
+        put("fmt ".toByteArray())
+        putInt(16) // PCM
+        putShort(1) // PCM format
+        putShort(channels.toShort())
+        putInt(sampleRate)
+        putInt(byteRate)
+        putShort((channels * 2).toShort()) // block align
+        putShort(16) // bits per sample
+        put("data".toByteArray())
+        putInt(0) // placeholder for data size
+    }
+    out.write(header)
+}
+
+private fun updateWavHeader(file: File) {
+    val size = file.length().toInt()
+    val dataSize = size - 44
+    val buffer = RandomAccessFile(file, "rw")
+    buffer.seek(4)
+    buffer.writeInt(Integer.reverseBytes(size - 8))
+    buffer.seek(40)
+    buffer.writeInt(Integer.reverseBytes(dataSize))
+    buffer.close()
+}
+
 class BluetoothReducer : Reducer<BluetoothState, BluetoothAction> {
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override fun reduce(state: BluetoothState, action: BluetoothAction): ReduceResult<BluetoothState, BluetoothAction> =
         when (action) {
             is BluetoothAction.BluetoothInitialised ->
@@ -85,6 +160,8 @@ class BluetoothReducer : Reducer<BluetoothState, BluetoothAction> {
                 state.copy(message = action.message).withoutEffect()
             is BluetoothAction.ActivityCreated ->
                 state.copy(activity = action.activity).withoutEffect()
+            is BluetoothAction.ContextCreated ->
+                state.copy(context = action.context).withoutEffect()
             is BluetoothAction.DeviceScanned -> {
                 val deviceFound = state.devices.find { it.mac == action.mac }
                 if (deviceFound != null) {
@@ -106,6 +183,55 @@ class BluetoothReducer : Reducer<BluetoothState, BluetoothAction> {
                 state.copy(message = "", devices = listOf()).withoutEffect()
             is BluetoothAction.NamedOnlyToggled ->
                 state.copy(namedOnly = action.enabled).withoutEffect()
+            is BluetoothAction.NoRealgateToggled ->
+                state.copy(noRealgate = action.enabled).withoutEffect()
+            is BluetoothAction.SoundPlayed -> {
+                Log.d(logTag, "BluetoothAction.SoundPlayed ${action.name}")
+                val sound = when (action.name) {
+                    "PTT_Start" -> R.raw.start_rec
+                    else -> R.raw.stop_rec
+                }
+                val mediaPlayer = MediaPlayer.create(state.context, sound)
+                mediaPlayer.start()
+                state.withoutEffect()
+            }
+            is BluetoothAction.AudioManagerInitialised -> {
+                state.copy(audioManager = action.audioManager).withoutEffect()
+            }
+            is BluetoothAction.ScopeInitialised -> {
+                state.copy(coroutineScope = action.coroutineScope).withoutEffect()
+            }
+            BluetoothAction.RecordingToggled -> {
+                Log.d(logTag, "ath2 BluetoothAction.RecordingToggled ${state.isRecording}")
+                if (state.isRecording) {
+                    state.recordingJob?.cancel()
+
+                    state.audioManager?.isBluetoothScoOn = false
+                    state.audioManager?.mode = AudioManager.MODE_NORMAL
+
+                    Log.d(logTag, "ath2 play stop sound")
+                    state.context?.playSound(R.raw.stop_rec)
+
+                    state.copy(
+                        recordingJob = null,
+                        isRecording = false
+                    ).withoutEffect()
+                } else {
+                    Log.d(logTag, "ath2 play start sound")
+                    state.context?.playSound(R.raw.start_rec) {
+//                        startBluetoothSco(state)
+                    }
+                    state.copy(isRecording = true).withoutEffect()
+                }
+            }
+            is BluetoothAction.RecordingSet -> {
+                Log.d(logTag, "BluetoothAction.RecordingSet ")
+                if (action.enabled && !state.isRecording) startRecording(state)
+                state.copy(isRecording = action.enabled).withoutEffect()
+            }
+            is BluetoothAction.RecordingStarted -> {
+                state.copy(audioRecord = action.audioRecord, recordingJob = action.recordingJob).withoutEffect()
+            }
         }
 }
 
@@ -123,7 +249,11 @@ fun checkBluetoothPermissions(activity: Activity?) : Boolean {
         return requiredPermissions
     }
 
-    val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    val permissions = mutableListOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.MODIFY_AUDIO_SETTINGS
+    )
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) permissions += listOf(
         Manifest.permission.BLUETOOTH_SCAN,
         Manifest.permission.BLUETOOTH_CONNECT
@@ -136,6 +266,101 @@ fun checkBluetoothPermissions(activity: Activity?) : Boolean {
 
 fun debugMessage(message: String) {
     bluetoothStore.send(BluetoothAction.BluetoothDebugMessaged(message))
+}
+
+val audioDeviceCallback: AudioDeviceCallback = object : AudioDeviceCallback() {
+    override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
+        Log.d(logTag, "$addedDevices")
+    }
+
+    override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
+        Log.d(logTag, "$removedDevices")
+    }
+}
+
+fun startBluetoothSco(
+    state: BluetoothState
+) {
+    Log.d(logTag, "ath2 startBluetoothSco() ${state.audioManager}")
+    state.audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+    state.audioManager?.startBluetoothSco()
+    state.audioManager?.isBluetoothScoOn = true
+}
+
+@RequiresPermission(Manifest.permission.RECORD_AUDIO)
+fun startRecording(
+    state: BluetoothState
+) {
+    return
+    Log.d(logTag, "ath2 startRecording()")
+    val sampleRate = 16000
+    val channelConfig = AudioFormat.CHANNEL_IN_MONO
+    val encoding = AudioFormat.ENCODING_PCM_16BIT
+    val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, encoding)
+    val audioRecord = AudioRecord(
+        MediaRecorder.AudioSource.MIC,
+        sampleRate,
+        channelConfig,
+        encoding,
+        bufferSize
+    )
+
+    val outputFile = File(state.context?.cacheDir, "bluetooth_recording_${System.currentTimeMillis()}.wav")
+
+    // Launch coroutine to write raw PCM audio
+    val recordingJob = state.coroutineScope?.launch(Dispatchers.IO) {
+        val outputStream = BufferedOutputStream(FileOutputStream(outputFile))
+        writeWavHeader(outputStream, sampleRate, channelConfig)
+
+        val buffer = ByteArray(bufferSize)
+        state.audioRecord?.startRecording()
+
+        while (isActive) {
+            val read = state.audioRecord?.read(buffer, 0, buffer.size) ?: 0
+            if (read > 0) {
+                outputStream.write(buffer, 0, read)
+            }
+        }
+
+        state.audioRecord?.stop()
+        state.audioRecord?.release()
+        state.copy(audioRecord = null)
+        updateWavHeader(outputFile)
+        outputStream.close()
+    }
+
+    bluetoothStore.send(BluetoothAction.RecordingStarted(audioRecord, recordingJob!!))
+}
+
+fun initAudioManager(
+    state: BluetoothState,
+    context: Context? = null
+) {
+    if (context == null) {
+        Log.d(logTag, "context is null, cancelling")
+        return
+    }
+    if (state.audioManager != null) return
+
+    val audioManager = context.getSystemService(AUDIO_SERVICE) as AudioManager
+    audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
+    bluetoothStore.send(BluetoothAction.AudioManagerInitialised(audioManager))
+    val scoReceiver = object : BroadcastReceiver() {
+        @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+        override fun onReceive(context: Context?, intent: Intent?) {
+//            Log.d(logTag, "ath2 onReceive() triggered ${intent?.action == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED} ${intent?.action}")
+            if (intent?.action == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED) {
+                val audioState = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
+//                Log.d(logTag, "ath2 onReceive() triggered ${audioState == AudioManager.SCO_AUDIO_STATE_CONNECTED} $audioState")
+                if (audioState == AudioManager.SCO_AUDIO_STATE_CONNECTED && !state.isRecording) {
+                    bluetoothStore.send(BluetoothAction.RecordingSet(true))
+                }
+            }
+        }
+    }
+
+    Log.d(logTag, "ath2 Audio manager initialised()")
+    context.registerReceiver(scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
 }
 
 fun initBluetooth(
@@ -235,51 +460,18 @@ private val gattCallback = object : BluetoothGattCallback() {
     override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
         super.onServicesDiscovered(gatt, status)
 
-        val bentoUUID = "00001ae1-0000-1000-8000-00805f9b34fb"
-        val ambieUUID = "5052494d-2dab-0341-6972-6f6861424c45"
-        val characteristicUUID = "00002ce1-0000-1000-8000-00805f9b34fb"
-        val ambieCharacteristics = listOf(
-            "43484152-2dab-3241-6972-6f6861424c45",
-            "43484152-2dab-3141-6972-6f6861424c45",
-            "43484152-2dab-3041-6972-6f6861424c45",
-            "43484152-2dab-3641-6972-6f6861424c45"
-        )
+        val athUUID = UUID.fromString("b283d606-04fd-11ee-be56-0242ac120002")
+        val athCharacteristicUUID = UUID.fromString("b283dc64-04fd-11ee-be56-0242ac120002")
 
         if (status != BluetoothGatt.GATT_SUCCESS || gatt == null) return
 
-        for (service in gatt.services) {
-            val serviceUUID = service.uuid.toString()
-            if (serviceUUID != bentoUUID && serviceUUID != ambieUUID) continue
-            for (characteristic in service.characteristics) {
-                Log.d(logTag, "ambie test ${characteristic.uuid} $characteristic")
-            }
-            var characteristic: BluetoothGattCharacteristic? = null
-            if (serviceUUID == ambieUUID) {
-                for (ambieCharacteristic in ambieCharacteristics) {
-                    characteristic = service.getCharacteristic(UUID.fromString(ambieCharacteristic))
-                    Log.d(logTag, "ambie characteristic ${characteristic.uuid} $characteristic")
-                }
-            } else {
-                characteristic = service.getCharacteristic(UUID.fromString(characteristicUUID))
-            }
-            if (characteristic == null) continue
+        val service = gatt.getService(athUUID)
+        val characteristic = service?.getCharacteristic(athCharacteristicUUID)
+        gatt.setCharacteristicNotification(characteristic, true)
 
-            gatt.setCharacteristicNotification(characteristic, true)
-            var ambieDescriptor: BluetoothGattDescriptor? = null
-            for (descriptor in characteristic.descriptors) {
-                Log.d(logTag, "ambie descriptors ${descriptor.uuid}")
-                ambieDescriptor = descriptor
-            }
-
-            if (ambieDescriptor == null) return
-
-            Log.d(logTag, "ambie write descriptors 0 ${characteristic.properties}")
-            var test = gatt.writeDescriptor(ambieDescriptor, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
-            Log.d(logTag, "ambie write descriptors 1 $test")
-            gatt.writeDescriptor(ambieDescriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            Log.d(logTag, "ambie write descriptors 2 $test")
-            gatt.setCharacteristicNotification(characteristic, true)
-        }
+        val descriptor = characteristic?.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
+        val enableNotificationValue = byteArrayOf(0x01, 0x00)
+        gatt.writeDescriptor(descriptor!!, enableNotificationValue)
     }
 
     override fun onDescriptorWrite(
@@ -290,23 +482,25 @@ private val gattCallback = object : BluetoothGattCallback() {
         Log.d(logTag, "ambie onDescriptorWrite() $gatt $descriptor $status")
     }
 
+    private var lastPayload: ByteArray? = null
+
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray
     ) {
-        Log.d(logTag, "ambie onCharacteristicChanged() $value $characteristic")
+        val current = value
+        if (lastPayload?.contentEquals(current) == true) return
+        lastPayload = current
+        Log.d(logTag, "ath onCharacteristicChanged() $value $characteristic")
 
         if (value.contentEquals(byteArrayOf(1))) {
             // primary button has been pressed
-        } else if (value.contentEquals(byteArrayOf(2))) {
-            // F1 button has been pressed
-        } else if (value.contentEquals(byteArrayOf(4))) {
-            return
-        } else if (value.contentEquals(byteArrayOf(8))) {
-            return
+            Log.d(logTag, "ath value.contentEquals(byteArrayOf(1))")
+            bluetoothStore.send(BluetoothAction.RecordingToggled)
         } else if (value.contentEquals(byteArrayOf(0))) {
             // any button has been released
+            Log.d(logTag, "ath value.contentEquals(byteArrayOf(0))")
             return
         }
     }
@@ -320,27 +514,6 @@ fun disconnectDevice(
         state.connectedDevice?.gatt?.disconnect()
     } catch (e: Exception) {
         debugMessage("Failed to disconnect from ${state.connectedDevice?.name}, error: $e")
-    }
-}
-
-@Throws(IOException::class)
-fun receiveData(socket: BluetoothSocket) {
-    val socketInputStream: InputStream = socket.inputStream
-    val socketOutputStream: OutputStream = socket.outputStream
-    val buffer = ByteArray(256)
-    var bytes: Int
-    Log.d(logTag, "ambie receiveData() called")
-
-    // Keep looping to listen for received messages
-    while (true) {
-        try {
-            bytes = socketInputStream.read(buffer) //read bytes from input buffer
-            val readMessage = String(buffer, 0, bytes)
-            // Send the obtained bytes to the UI Activity via handler
-            Log.i("ambie logging", readMessage + "")
-        } catch (e: IOException) {
-            break
-        }
     }
 }
 
@@ -361,11 +534,6 @@ fun connectToDevice(
             gattCallback,
             BluetoothDevice.TRANSPORT_LE
         )
-        Log.d(logTag, "ambie Socket Test 1")
-        val ambieUUID = UUID.fromString("5052494d-2dab-0341-6972-6f6861424c45")
-        val socket = bluetoothDevice?.createRfcommSocketToServiceRecord(ambieUUID)
-        Log.d(logTag, "ambie Socket Test 2 $socket")
-        if (socket != null) receiveData(socket)
     } catch (e: Exception) {
         debugMessage("Failed to connect to ${device.name}, error: $e")
     }
@@ -417,6 +585,13 @@ fun BluetoothDeviceCard(
     }
 }
 
+fun getFilteredDevices(state: BluetoothState): List<Device> {
+    return state.devices.filter {
+        (!state.namedOnly || it.name != "") &&
+        (!state.noRealgate || !it.name!!.lowercase().contains("realgate"))
+    }
+}
+
 @SuppressLint("MissingPermission")
 @Composable
 fun BluetoothMain (
@@ -425,12 +600,18 @@ fun BluetoothMain (
     context: Context? = null
 ) {
     checkBluetoothPermissions(state.activity)
-    val deviceList = state.devices.filter { it.name != if (state.namedOnly) "" else null }
+    var deviceList = getFilteredDevices(state)
+    val namedDevices = state.devices.filter { it.name != if (state.namedOnly) "" else null }
+    val scope = rememberCoroutineScope()
+    bluetoothStore.send(BluetoothAction.ScopeInitialised(scope))
+    if (state.audioManager == null) initAudioManager(state, context)
     Column (
         modifier = modifier
     ){
         Text("Debug message: ${state.message}")
-        Text("Debug devices.size: ${deviceList.size}")
+        Text("Debug devices.size: ${state.devices.size}")
+        Text("Debug namedDevices.size: ${namedDevices.size}")
+        Text("Debug filtered devices.size: ${deviceList.size}")
         Text("Bluetooth Initialised? ${state.manager != null}")
         Row (
             horizontalArrangement = Arrangement.SpaceBetween
@@ -485,27 +666,13 @@ fun BluetoothMain (
                         connectToDevice(
                             state,
                             device = Device(
-                                name="Bento",
-                                mac=""
+                                name="Audio Technica",
+                                mac="30:53:C1:7D:26:07"
                             )
                         )
                     }
                 ) {
-                    Text("bento")
-                }
-                Button(
-                    modifier = Modifier.padding(start = 8.dp),
-                    onClick = {
-                        connectToDevice(
-                            state,
-                            device = Device(
-                                name="ambie",
-                                mac="C8:D6:17:C9:3F:BF"
-                            )
-                        )
-                    }
-                ) {
-                    Text("ambie")
+                    Text("Audio Technica")
                 }
             }
         }
@@ -519,6 +686,19 @@ fun BluetoothMain (
                 checked = state.namedOnly,
                 onCheckedChange = {
                     bluetoothStore.send(BluetoothAction.NamedOnlyToggled(it))
+                }
+            )
+        }
+        Row (
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Filter out REALGATE")
+            Switch(
+                modifier = Modifier
+                    .padding(start = 8.dp),
+                checked = state.noRealgate,
+                onCheckedChange = {
+                    bluetoothStore.send(BluetoothAction.NoRealgateToggled(it))
                 }
             )
         }
